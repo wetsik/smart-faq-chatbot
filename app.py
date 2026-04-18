@@ -93,24 +93,24 @@ body {
 
 SAMPLE_KB = [
     {
-        "title": "Opening hours",
-        "text": "We are available Monday to Friday from 9:00 AM to 6:00 PM. Support is closed on weekends and public holidays.",
+        "question": "What are your working hours?",
+        "answer": "We are available Monday to Friday from 9:00 AM to 6:00 PM. Support is closed on weekends and public holidays.",
     },
     {
-        "title": "Refund policy",
-        "text": "Refunds are available within 14 days of purchase if the service has not been substantially used. Submit the order number and reason to support.",
+        "question": "What is your refund policy?",
+        "answer": "Refunds are available within 14 days of purchase if the service has not been substantially used. Submit the order number and reason to support.",
     },
     {
-        "title": "Account access",
-        "text": "If you cannot log in, use the password reset link on the sign-in page. For locked accounts, contact support with your registered email address.",
+        "question": "How can I reset my password?",
+        "answer": "If you cannot log in, use the password reset link on the sign-in page. For locked accounts, contact support with your registered email address.",
     },
     {
-        "title": "Shipping",
-        "text": "Standard shipping takes 3 to 5 business days. Express shipping takes 1 to 2 business days depending on location.",
+        "question": "How long does shipping take?",
+        "answer": "Standard shipping takes 3 to 5 business days. Express shipping takes 1 to 2 business days depending on location.",
     },
     {
-        "title": "Billing",
-        "text": "Invoices are sent automatically after payment. If you need a VAT invoice, include your company details in the billing profile.",
+        "question": "Where can I find invoices?",
+        "answer": "Invoices are sent automatically after payment. If you need a VAT invoice, include your company details in the billing profile.",
     },
 ]
 
@@ -193,7 +193,7 @@ def parse_faq_pairs(text: str) -> list[tuple[str, str]]:
         return []
 
     matches = list(re.finditer(r"(?:^|\s)(\d+)\.\s+", text, flags=re.M))
-    if len(matches) < 2:
+    if len(matches) == 0:
         return []
 
     pairs: list[tuple[str, str]] = []
@@ -429,7 +429,7 @@ def render_sidebar() -> None:
         sources: list[tuple[str, str]] = []
         if use_sample:
             for idx, item in enumerate(SAMPLE_KB, 1):
-                sources.append((f"sample_faq_{idx}.txt", f"{item['title']}: {item['text']}"))
+                sources.append((f"sample_faq_{idx}.txt", f"{idx}. {item['question']}\n{item['answer']}"))
         if uploaded_files:
             for file in uploaded_files:
                 sources.append((file.name, read_uploaded_file(file)))
