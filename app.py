@@ -194,29 +194,64 @@ def parse_faq_pairs(text: str) -> list[tuple[str, str]]:
     if not cleaned:
         return []
 
-    matches = list(re.finditer(r"(?:^|\s)(\d+)\.\s+", text, flags=re.M))
-    if len(matches) == 0:
-        return []
-
+    lines = [line.rstrip() for line in text.splitlines()]
     pairs: list[tuple[str, str]] = []
-    for idx, match in enumerate(matches):
-        start = match.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        block = text[start:end].strip()
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if not lines:
-            continue
 
-        question = lines[0].rstrip(" ?")
-        answer = " ".join(lines[1:]).strip()
+    current_question = ""
+    current_answer_lines: list[str] = []
+    saw_numbered_question = False
 
-        if not answer and "?" in question:
-            q_end = question.find("?")
-            answer = question[q_end + 1 :].strip()
-            question = question[: q_end + 1].strip()
-
+    def flush_pair() -> None:
+        nonlocal current_question, current_answer_lines, saw_numbered_question
+        question = normalize_text(current_question).rstrip(" ?")
+        answer = normalize_text(" ".join(current_answer_lines))
         if question and answer:
             pairs.append((question, answer))
+        current_question = ""
+        current_answer_lines = []
+        saw_numbered_question = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if current_question:
+                current_answer_lines.append("")
+            continue
+
+        numbered_match = re.match(r"^\d+\.\s*(.+)$", line)
+        if numbered_match:
+            if current_question:
+                flush_pair()
+            current_question = numbered_match.group(1).strip()
+            saw_numbered_question = True
+            continue
+
+        qa_question_match = re.match(r"^(?:Q(?:uestion)?\s*[:\-]\s*)(.+)$", line, flags=re.I)
+        if qa_question_match:
+            if current_question:
+                flush_pair()
+            current_question = qa_question_match.group(1).strip()
+            saw_numbered_question = False
+            continue
+
+        qa_answer_match = re.match(r"^(?:A(?:nswer)?\s*[:\-]\s*)(.+)$", line, flags=re.I)
+        if qa_answer_match and current_question:
+            current_answer_lines.append(qa_answer_match.group(1).strip())
+            continue
+
+        if current_question:
+            current_answer_lines.append(line)
+            continue
+
+        if not current_question and "?" in line:
+            question_part, answer_part = line.split("?", 1)
+            current_question = f"{question_part.strip()}?"
+            if answer_part.strip():
+                current_answer_lines.append(answer_part.strip())
+                flush_pair()
+
+    if current_question:
+        flush_pair()
 
     return pairs
 
@@ -383,16 +418,18 @@ def build_answer(query: str, retrieved: list[tuple[float, Chunk]]) -> str:
     best_score, best_chunk = retrieved[0]
 
     if best_score < 0.55:
+        suggestions = []
+        for _, chunk in retrieved[:3]:
+            label = chunk.question or chunk.text.splitlines()[0]
+            suggestions.append(label.strip())
+        suggestion_text = "; ".join(suggestions) if suggestions else "a more specific FAQ entry"
         return (
-            "I found a weak match, but I am not confident enough to answer safely. "
-            "Try asking with words closer to the FAQ wording or add a more specific FAQ entry."
+            "I could not find a confident answer in the FAQ.\n\n"
+            f"Closest FAQ questions: {suggestion_text}"
         )
 
     if best_chunk.answer:
-        return (
-            f"{best_chunk.answer}\n\n"
-            f"Source: {best_chunk.doc_name} | Match confidence: {best_score:.3f}"
-        )
+        return best_chunk.answer
 
     keywords = extract_keywords(query)
     lead = "Here is the most relevant information I found:"
@@ -415,9 +452,10 @@ def format_sources(retrieved: list[tuple[float, Chunk]]) -> list[dict[str, str]]
         items.append(
             {
                 "document": chunk.doc_name,
+                "question": chunk.question or "",
                 "chunk": str(chunk.chunk_id + 1),
                 "score": f"{score:.3f}",
-                "excerpt": chunk.text[:260],
+                "answer": chunk.answer[:260] if chunk.answer else chunk.text[:260],
             }
         )
     return items
