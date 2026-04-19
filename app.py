@@ -1,123 +1,247 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
+import math
 import os
-import re
 import threading
-from collections import Counter
-from dataclasses import dataclass
-from datetime import datetime
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Iterable
+from pathlib import Path
 
-import numpy as np
+import pandas as pd
 import streamlit as st
-from pypdf import PdfReader
-from sklearn.feature_extraction.text import TfidfVectorizer
 
 
 st.set_page_config(
-    page_title="Smart FAQ Chatbot (RAG)",
-    page_icon="💬",
+    page_title="Lead Scoring & Pipeline Manager",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 HEALTH_SERVER_STARTED = False
+BASE_DIR = Path(__file__).resolve().parent
+SAMPLE_LEADS_PATH = BASE_DIR / "sample_leads.csv"
 
+NUMERIC_COLUMNS = [
+    "budget",
+    "deal_value",
+    "last_activity_days",
+    "meetings_booked",
+    "email_open_rate",
+    "employees",
+]
+
+TEXT_COLUMNS = [
+    "lead_id",
+    "company",
+    "manager",
+    "industry",
+    "source",
+    "region",
+    "stage",
+]
+
+REQUIRED_COLUMNS = TEXT_COLUMNS + NUMERIC_COLUMNS
+OPTIONAL_COLUMNS = ["bitrix_owner"]
+
+STAGE_ORDER = ["New", "Contacted", "Qualified", "Proposal", "Negotiation", "Won", "Lost"]
 
 CSS = """
 <style>
 :root {
-    --bg: #f6f3ec;
-    --panel: #fffdf8;
-    --text: #1f2937;
-    --muted: #6b7280;
-    --accent: #215f7c;
-    --accent-2: #a85c2f;
-    --border: rgba(33, 95, 124, 0.15);
+    --bg-start: #111827;
+    --bg-end: #0f172a;
+    --surface: rgba(31, 41, 55, 0.92);
+    --surface-strong: rgba(17, 24, 39, 0.96);
+    --ink: #f9fafb;
+    --muted: #cbd5e1;
+    --teal: #5eead4;
+    --gold: #fbbf24;
+    --rose: #fb923c;
+    --border: rgba(148, 163, 184, 0.18);
+    --shadow: 0 18px 40px rgba(2, 6, 23, 0.35);
 }
 
-body {
-    background: linear-gradient(180deg, #f8f4ed 0%, #fffdf8 100%);
-    color: var(--text);
+.stApp {
+    background:
+        radial-gradient(circle at top left, rgba(94,234,212,0.08), transparent 26%),
+        radial-gradient(circle at top right, rgba(251,191,36,0.08), transparent 24%),
+        linear-gradient(180deg, var(--bg-start) 0%, var(--bg-end) 100%);
 }
 
 .block-container {
-    padding-top: 1.4rem;
+    padding-top: 1.15rem;
     padding-bottom: 2rem;
 }
 
 .hero {
-    padding: 1.2rem 1.4rem;
+    padding: 1.5rem;
+    border-radius: 1.5rem;
     border: 1px solid var(--border);
-    border-radius: 1.2rem;
-    background: radial-gradient(circle at top right, rgba(33,95,124,0.12), transparent 36%),
-                linear-gradient(135deg, rgba(33,95,124,0.06), rgba(168,92,47,0.05));
-    box-shadow: 0 10px 30px rgba(17,24,39,0.05);
+    background:
+        linear-gradient(135deg, rgba(94,234,212,0.08), rgba(251,191,36,0.07)),
+        var(--surface-strong);
+    box-shadow: var(--shadow);
 }
 
 .hero h1 {
     margin: 0;
-    font-size: 2rem;
+    font-size: 2.2rem;
+    line-height: 1.1;
+    color: var(--ink);
 }
 
 .hero p {
-    margin: 0.4rem 0 0;
+    margin: 0.55rem 0 0;
     color: var(--muted);
+    max-width: 70rem;
 }
 
-.chip {
+.hero-tags {
+    margin-top: 1rem;
+}
+
+.hero-tag {
     display: inline-block;
-    padding: 0.35rem 0.7rem;
     margin-right: 0.45rem;
     margin-bottom: 0.45rem;
+    padding: 0.38rem 0.78rem;
     border-radius: 999px;
-    background: rgba(33,95,124,0.08);
-    color: var(--accent);
+    background: rgba(94,234,212,0.12);
+    color: #99f6e4;
     font-size: 0.84rem;
+    font-weight: 600;
 }
 
-.source-card {
+.section-card {
+    background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 0.9rem;
-    padding: 0.9rem;
-    background: rgba(255,255,255,0.78);
-    margin-bottom: 0.65rem;
+    border-radius: 1.2rem;
+    padding: 1rem 1.1rem;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+    height: 100%;
+    color: var(--ink);
 }
 
-.small-muted {
+.section-title {
+    font-size: 1.02rem;
+    font-weight: 700;
+    margin-bottom: 0.35rem;
+    color: var(--ink);
+}
+
+.section-subtle {
     color: var(--muted);
     font-size: 0.92rem;
+    margin-bottom: 0.9rem;
+}
+
+.mini-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+}
+
+.mini-stat {
+    background: rgba(15, 23, 42, 0.35);
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 1rem;
+    padding: 0.75rem;
+}
+
+.mini-label {
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.mini-value {
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin-top: 0.15rem;
+    color: var(--ink);
+}
+
+.priority-pill {
+    display: inline-block;
+    padding: 0.32rem 0.72rem;
+    border-radius: 999px;
+    font-size: 0.83rem;
+    font-weight: 700;
+}
+
+.priority-high {
+    background: rgba(16, 185, 129, 0.16);
+    color: #6ee7b7;
+}
+
+.priority-medium {
+    background: rgba(251, 191, 36, 0.16);
+    color: #fcd34d;
+}
+
+.priority-low {
+    background: rgba(251, 146, 60, 0.16);
+    color: #fdba74;
+}
+
+.lead-strip {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: center;
+    padding: 0.75rem 0;
+    border-bottom: 1px dashed rgba(148, 163, 184, 0.14);
+}
+
+.lead-strip:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.lead-meta {
+    color: var(--muted);
+    font-size: 0.88rem;
+}
+
+.bar-track {
+    width: 100%;
+    height: 0.55rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #14b8a6 0%, #f59e0b 100%);
+}
+
+.insight-list {
+    margin: 0;
+    padding-left: 1.1rem;
+    color: var(--ink);
+}
+
+.insight-list li {
+    margin-bottom: 0.45rem;
+}
+
+[data-testid="stMetricLabel"] {
+    color: #cbd5e1;
+}
+
+[data-testid="stMetricValue"] {
+    color: #f9fafb;
+}
+
+.stCaption {
+    color: #cbd5e1;
 }
 </style>
 """
-
-
-SAMPLE_KB = [
-    {
-        "question": "What are your working hours?",
-        "answer": "We are available Monday to Friday from 9:00 AM to 6:00 PM. Support is closed on weekends and public holidays.",
-    },
-    {
-        "question": "What is your refund policy?",
-        "answer": "Refunds are available within 14 days of purchase if the service has not been substantially used. Submit the order number and reason to support.",
-    },
-    {
-        "question": "How can I reset my password?",
-        "answer": "If you cannot log in, use the password reset link on the sign-in page. For locked accounts, contact support with your registered email address.",
-    },
-    {
-        "question": "How long does shipping take?",
-        "answer": "Standard shipping takes 3 to 5 business days. Express shipping takes 1 to 2 business days depending on location.",
-    },
-    {
-        "question": "Where can I find invoices?",
-        "answer": "Invoices are sent automatically after payment. If you need a VAT invoice, include your company details in the billing profile.",
-    },
-]
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -132,9 +256,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         if self.path in ("/", "/health"):
             self._send_ok(body=True)
             return
-
         self.send_response(404)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"not found")
 
@@ -142,7 +264,6 @@ class HealthHandler(BaseHTTPRequestHandler):
         if self.path in ("/", "/health"):
             self._send_ok(body=False)
             return
-
         self.send_response(404)
         self.end_headers()
 
@@ -167,7 +288,6 @@ def start_health_server() -> None:
     try:
         health_port = int(health_port_raw)
     except ValueError:
-        print(f"Skipping health server: invalid HEALTHCHECK_PORT={health_port_raw!r}")
         return
 
     streamlit_port_raw = os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("PORT", "8501")
@@ -177,464 +297,560 @@ def start_health_server() -> None:
         streamlit_port = 8501
 
     if health_port == streamlit_port:
-        print(
-            "Skipping health server: HEALTHCHECK_PORT matches the Streamlit port. "
-            "Use a separate port if your host exposes one."
-        )
         return
 
     def run_server() -> None:
         server = ThreadingHTTPServer(("0.0.0.0", health_port), HealthHandler)
-        print(f"Health server started on port {health_port}")
         server.serve_forever()
 
     threading.Thread(target=run_server, daemon=True).start()
     HEALTH_SERVER_STARTED = True
 
 
-def init_state() -> None:
-    defaults = {
-        "index_ready": False,
-        "docs": [],
-        "chunks": [],
-        "word_vectorizer": None,
-        "word_matrix": None,
-        "char_vectorizer": None,
-        "char_matrix": None,
-        "corpus_hash": None,
-        "messages": [],
-        "conversations": [],
-        "active_conversation_id": "current",
-        "last_sources": [],
-    }
-    for key, value in defaults.items():
-        st.session_state.setdefault(key, value)
-
-
-@dataclass
-class Chunk:
-    doc_name: str
-    text: str
-    chunk_id: int
-    question: str = ""
-    answer: str = ""
-
-
-def normalize_text(text: str) -> str:
-    text = re.sub(r"\s+", " ", text or "").strip()
-    return text
-
-
-def split_into_chunks(text: str, max_chars: int = 800, overlap: int = 120) -> list[str]:
-    text = normalize_text(text)
-    if not text:
-        return []
-
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    chunks: list[str] = []
-    current = ""
-
-    for sentence in sentences:
-        if not sentence:
-            continue
-        candidate = f"{current} {sentence}".strip()
-        if len(candidate) <= max_chars:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-            current = sentence
-        else:
-            chunks.append(sentence[:max_chars])
-            current = sentence[max_chars - overlap :]
-
-    if current:
-        chunks.append(current)
-
-    refined: list[str] = []
-    for chunk in chunks:
-        if len(chunk) <= max_chars:
-            refined.append(chunk)
-        else:
-            start = 0
-            while start < len(chunk):
-                end = min(len(chunk), start + max_chars)
-                refined.append(chunk[start:end])
-                if end == len(chunk):
-                    break
-                start = max(0, end - overlap)
-    return [c for c in refined if c.strip()]
-
-
-def parse_faq_pairs(text: str) -> list[tuple[str, str]]:
-    cleaned = normalize_text(text)
-    if not cleaned:
-        return []
-
-    lines = [line.rstrip() for line in text.splitlines()]
-    pairs: list[tuple[str, str]] = []
-
-    current_question = ""
-    current_answer_lines: list[str] = []
-    saw_numbered_question = False
-
-    def flush_pair() -> None:
-        nonlocal current_question, current_answer_lines, saw_numbered_question
-        question = normalize_text(current_question).rstrip(" ?")
-        answer = normalize_text(" ".join(current_answer_lines))
-        if question and answer:
-            pairs.append((question, answer))
-        current_question = ""
-        current_answer_lines = []
-        saw_numbered_question = False
-
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            if current_question:
-                current_answer_lines.append("")
-            continue
-
-        numbered_match = re.match(r"^\d+\.\s*(.+)$", line)
-        if numbered_match:
-            if current_question:
-                flush_pair()
-            current_question = numbered_match.group(1).strip()
-            saw_numbered_question = True
-            continue
-
-        qa_question_match = re.match(r"^(?:Q(?:uestion)?\s*[:\-]\s*)(.+)$", line, flags=re.I)
-        if qa_question_match:
-            if current_question:
-                flush_pair()
-            current_question = qa_question_match.group(1).strip()
-            saw_numbered_question = False
-            continue
-
-        qa_answer_match = re.match(r"^(?:A(?:nswer)?\s*[:\-]\s*)(.+)$", line, flags=re.I)
-        if qa_answer_match and current_question:
-            current_answer_lines.append(qa_answer_match.group(1).strip())
-            continue
-
-        if current_question:
-            current_answer_lines.append(line)
-            continue
-
-        if not current_question and "?" in line:
-            question_part, answer_part = line.split("?", 1)
-            current_question = f"{question_part.strip()}?"
-            if answer_part.strip():
-                current_answer_lines.append(answer_part.strip())
-                flush_pair()
-
-    if current_question:
-        flush_pair()
-
-    return pairs
-
-
-def read_pdf_bytes(file_bytes: bytes) -> str:
-    reader = PdfReader(io.BytesIO(file_bytes))
-    pages = []
-    for page in reader.pages:
-        pages.append(page.extract_text() or "")
-    return "\n".join(pages)
-
-
-def read_uploaded_file(uploaded_file) -> str:
-    suffix = uploaded_file.name.lower().split(".")[-1]
-    data = uploaded_file.getvalue()
-    if suffix == "pdf":
-        return read_pdf_bytes(data)
-    if suffix in {"txt", "md", "csv"}:
-        return data.decode("utf-8", errors="ignore")
-    return data.decode("utf-8", errors="ignore")
-
-
-def parse_csv_text(text: str) -> str:
+def normalize_number(value, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = str(value).strip().replace(",", "")
     try:
-        rows = list(csv.reader(io.StringIO(text)))
-    except Exception:
-        return text
+        return float(cleaned)
+    except ValueError:
+        return default
+
+
+def init_state() -> None:
+    st.session_state.setdefault(
+        "loaded_leads",
+        pd.DataFrame(
+            columns=REQUIRED_COLUMNS
+            + OPTIONAL_COLUMNS
+            + ["score", "priority", "conversion_probability", "pricing_recommendation", "strategy_note"]
+        ),
+    )
+    st.session_state.setdefault("response_seconds", None)
+    st.session_state.setdefault("dataset_label", "No dataset loaded")
+
+
+def load_leads_from_upload(uploaded_file) -> pd.DataFrame:
+    decoded = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+    rows = list(csv.DictReader(io.StringIO(decoded)))
     if not rows:
-        return text
-    return "\n".join(", ".join(row) for row in rows)
+        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS)
+    return pd.DataFrame(rows)
 
 
-def make_chunks_from_sources(sources: list[tuple[str, str]], max_chars: int) -> list[Chunk]:
-    chunks: list[Chunk] = []
-    for doc_name, text in sources:
-        if doc_name.lower().endswith(".csv"):
-            text = parse_csv_text(text)
-        pairs = parse_faq_pairs(text)
-        if pairs:
-            for idx, (question, answer) in enumerate(pairs):
-                combined = f"Question: {question}\nAnswer: {answer}"
-                chunks.append(
-                    Chunk(
-                        doc_name=doc_name,
-                        text=combined,
-                        chunk_id=idx,
-                        question=question,
-                        answer=answer,
-                    )
-                )
-            continue
-
-        for idx, chunk_text in enumerate(split_into_chunks(text, max_chars=max_chars)):
-            chunks.append(Chunk(doc_name=doc_name, text=chunk_text, chunk_id=idx))
-    return chunks
+def load_sample_leads() -> pd.DataFrame:
+    if not SAMPLE_LEADS_PATH.exists():
+        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS)
+    return pd.read_csv(SAMPLE_LEADS_PATH)
 
 
-def corpus_fingerprint(sources: Iterable[tuple[str, str]]) -> str:
-    h = hashlib.sha256()
-    for name, text in sources:
-        h.update(name.encode("utf-8"))
-        h.update(b"\0")
-        h.update(text.encode("utf-8", errors="ignore"))
-        h.update(b"\0")
-    return h.hexdigest()
+def score_to_priority(score: float) -> str:
+    if score >= 80:
+        return "High"
+    if score >= 60:
+        return "Medium"
+    return "Low"
 
 
-def build_index(chunks: list[Chunk]):
-    texts = [chunk.question or chunk.text for chunk in chunks]
-    if not texts:
-        return None, None, None, None
-    word_vectorizer = TfidfVectorizer(
-        stop_words="english",
-        ngram_range=(1, 2),
-        max_features=5000,
+def calculate_lead_score(row: pd.Series) -> float:
+    budget_component = min(row["budget"] / 70000.0, 1.0) * 28
+    value_component = min(row["deal_value"] / 85000.0, 1.0) * 19
+    activity_component = max(0.0, (10.0 - min(row["last_activity_days"], 10.0)) / 10.0) * 17
+    engagement_component = min(row["email_open_rate"] / 100.0, 1.0) * 12
+    meetings_component = min(row["meetings_booked"] / 3.0, 1.0) * 12
+    size_component = min(row["employees"] / 500.0, 1.0) * 8
+
+    stage_bonus = {
+        "New": 2,
+        "Contacted": 5,
+        "Qualified": 8,
+        "Proposal": 12,
+        "Negotiation": 16,
+        "Won": 20,
+        "Lost": 0,
+    }.get(str(row["stage"]), 3)
+
+    score = (
+        budget_component
+        + value_component
+        + activity_component
+        + engagement_component
+        + meetings_component
+        + size_component
+        + stage_bonus
     )
-    char_vectorizer = TfidfVectorizer(
-        analyzer="char_wb",
-        ngram_range=(3, 5),
-        max_features=7000,
+    return round(min(score, 100.0), 1)
+
+
+def calculate_conversion_probability(score: float, stage: str) -> float:
+    stage_modifier = {
+        "New": -12,
+        "Contacted": -6,
+        "Qualified": 0,
+        "Proposal": 6,
+        "Negotiation": 10,
+        "Won": 15,
+        "Lost": -25,
+    }.get(stage, 0)
+    probability = max(3.0, min(99.0, score + stage_modifier))
+    return round(probability, 1)
+
+
+def build_pricing_recommendation(row: pd.Series, conversion_probability: float) -> str:
+    base_value = row["deal_value"]
+    if conversion_probability >= 80:
+        price = base_value * 1.08
+        return f"Premium proposal: {format_currency(price)}"
+    if conversion_probability >= 60:
+        price = base_value
+        return f"Standard proposal: {format_currency(price)}"
+    price = max(row["budget"] * 0.95, base_value * 0.9)
+    return f"Entry offer: {format_currency(price)}"
+
+
+def build_strategy_note(row: pd.Series, conversion_probability: float) -> str:
+    if conversion_probability >= 80:
+        return "Fast-track this deal with a proposal call and decision timeline."
+    if conversion_probability >= 60:
+        return "Keep momentum with a tailored demo and pricing follow-up."
+    return "Re-qualify needs, budget, and authority before deeper sales effort."
+
+
+def prepare_leads(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(
+            columns=REQUIRED_COLUMNS
+            + OPTIONAL_COLUMNS
+            + ["score", "priority", "conversion_probability", "pricing_recommendation", "strategy_note"]
+        )
+
+    prepared = df.copy()
+
+    for column in REQUIRED_COLUMNS + OPTIONAL_COLUMNS:
+        if column not in prepared.columns:
+            prepared[column] = ""
+
+    for column in NUMERIC_COLUMNS:
+        prepared[column] = prepared[column].apply(normalize_number)
+
+    for column in TEXT_COLUMNS + OPTIONAL_COLUMNS:
+        prepared[column] = prepared[column].astype(str).str.strip()
+        prepared[column] = prepared[column].replace({"": "Unknown"})
+
+    prepared["bitrix_owner"] = prepared["bitrix_owner"].where(
+        prepared["bitrix_owner"] != "Unknown",
+        prepared["manager"],
     )
-    word_matrix = word_vectorizer.fit_transform(texts)
-    char_matrix = char_vectorizer.fit_transform(texts)
-    return word_vectorizer, word_matrix, char_vectorizer, char_matrix
+    prepared["score"] = prepared.apply(calculate_lead_score, axis=1)
+    prepared["priority"] = prepared["score"].apply(score_to_priority)
+    prepared["conversion_probability"] = prepared.apply(
+        lambda row: calculate_conversion_probability(row["score"], str(row["stage"])),
+        axis=1,
+    )
+    prepared["pricing_recommendation"] = prepared.apply(
+        lambda row: build_pricing_recommendation(row, row["conversion_probability"]),
+        axis=1,
+    )
+    prepared["strategy_note"] = prepared.apply(
+        lambda row: build_strategy_note(row, row["conversion_probability"]),
+        axis=1,
+    )
+    prepared["stage"] = pd.Categorical(prepared["stage"], categories=STAGE_ORDER, ordered=True)
+    prepared = prepared.sort_values(["conversion_probability", "deal_value"], ascending=[False, False]).reset_index(drop=True)
+    return prepared
 
 
-def extract_keywords(query: str, limit: int = 5) -> list[str]:
-    tokens = re.findall(r"[A-Za-z0-9']+", query.lower())
-    stop = {
-        "the",
-        "and",
-        "or",
-        "for",
-        "with",
-        "what",
-        "when",
-        "how",
-        "where",
-        "why",
-        "can",
-        "you",
-        "tell",
-        "about",
-        "please",
-        "i",
-        "need",
-        "to",
-        "a",
-        "an",
-        "is",
-        "are",
-        "do",
-        "does",
-        "my",
-        "we",
-        "our",
-    }
-    words = [t for t in tokens if len(t) > 5 and t not in stop]
-    return [word for word, _ in Counter(words).most_common(limit)]
+def format_currency(value: float) -> str:
+    return f"${value:,.0f}"
 
 
-def rank_chunks(
-    query: str,
-    word_vectorizer,
-    word_matrix,
-    char_vectorizer,
-    char_matrix,
-    chunks: list[Chunk],
-    top_k: int = 4,
-):
-    if (
-        not chunks
-        or word_vectorizer is None
-        or word_matrix is None
-        or char_vectorizer is None
-        or char_matrix is None
-    ):
+def priority_class(priority: str) -> str:
+    return {
+        "High": "priority-high",
+        "Medium": "priority-medium",
+        "Low": "priority-low",
+    }.get(priority, "priority-low")
+
+
+def filter_leads(
+    leads: pd.DataFrame,
+    selected_managers: list[str],
+    selected_stages: list[str],
+    selected_industries: list[str],
+    conversion_range: tuple[int, int],
+    budget_range: tuple[int, int],
+) -> pd.DataFrame:
+    if leads.empty:
+        return leads
+
+    filtered = leads.copy()
+    if selected_managers:
+        filtered = filtered[filtered["manager"].isin(selected_managers)]
+    if selected_stages:
+        filtered = filtered[filtered["stage"].astype(str).isin(selected_stages)]
+    if selected_industries:
+        filtered = filtered[filtered["industry"].isin(selected_industries)]
+
+    filtered = filtered[
+        (filtered["conversion_probability"] >= conversion_range[0])
+        & (filtered["conversion_probability"] <= conversion_range[1])
+        & (filtered["budget"] >= budget_range[0])
+        & (filtered["budget"] <= budget_range[1])
+    ]
+    return filtered.reset_index(drop=True)
+
+
+def render_sidebar() -> tuple[pd.DataFrame, pd.DataFrame]:
+    st.sidebar.markdown("## CRM Controls")
+    st.sidebar.caption("Use the bundled sample CSV or upload your own Bitrix-style lead export.")
+
+    use_sample = st.sidebar.toggle("Use sample dataset", value=False)
+    uploaded_file = st.sidebar.file_uploader("Upload leads CSV", type=["csv"])
+
+    if st.sidebar.button("Load data", use_container_width=True):
+        started = time.perf_counter()
+        if uploaded_file is not None:
+            leads = prepare_leads(load_leads_from_upload(uploaded_file))
+            st.session_state.dataset_label = f"Uploaded file: {uploaded_file.name}"
+        elif use_sample:
+            leads = prepare_leads(load_sample_leads())
+            st.session_state.dataset_label = f"Sample file: {SAMPLE_LEADS_PATH.name}"
+        else:
+            leads = pd.DataFrame(
+                columns=REQUIRED_COLUMNS
+                + OPTIONAL_COLUMNS
+                + ["score", "priority", "conversion_probability", "pricing_recommendation", "strategy_note"]
+            )
+            st.session_state.dataset_label = "No dataset loaded"
+
+        st.session_state.loaded_leads = leads
+        st.session_state.response_seconds = time.perf_counter() - started
+
+    leads = st.session_state.loaded_leads
+
+    managers = sorted(leads["manager"].astype(str).unique().tolist()) if not leads.empty else []
+    stages = [stage for stage in STAGE_ORDER if not leads.empty and stage in leads["stage"].astype(str).tolist()]
+    industries = sorted(leads["industry"].astype(str).unique().tolist()) if not leads.empty else []
+
+    selected_managers = st.sidebar.multiselect("Manager", managers, default=managers)
+    selected_stages = st.sidebar.multiselect("Pipeline stage", stages, default=stages)
+    selected_industries = st.sidebar.multiselect("Industry", industries, default=industries)
+
+    conversion_range = st.sidebar.slider("Conversion probability", 0, 100, (40, 100), 5)
+    max_budget = int(math.ceil(leads["budget"].max() / 1000.0) * 1000) if not leads.empty else 100000
+    budget_range = st.sidebar.slider("Budget range", 0, max_budget, (0, max_budget), 1000)
+
+    filtered = filter_leads(
+        leads,
+        selected_managers,
+        selected_stages,
+        selected_industries,
+        conversion_range,
+        budget_range,
+    )
+
+    st.sidebar.divider()
+    st.sidebar.markdown("### Data Status")
+    st.sidebar.write("Dataset loaded" if not leads.empty else "No dataset loaded")
+    st.sidebar.write(f"Total leads: {len(leads)}")
+    st.sidebar.write(f"Visible leads: {len(filtered)}")
+    st.sidebar.write(st.session_state.dataset_label)
+    if st.session_state.response_seconds is not None:
+        st.sidebar.success(f"Response time: {st.session_state.response_seconds:.4f} sec")
+
+    return leads, filtered
+
+
+def render_hero(total_leads: int) -> None:
+    st.markdown(
+        f"""
+        <div class="hero">
+            <h1>Lead Scoring &amp; Pipeline Manager</h1>
+            <p>
+                Sales analytics dashboard for ranking opportunities, monitoring pipeline health,
+                and reviewing CRM-ready leads with a Bitrix24-friendly structure.
+                The current workspace includes <strong>{total_leads}</strong> leads ready for demo.
+            </p>
+            <div class="hero-tags">
+                <span class="hero-tag">Project 3 Alignment</span>
+                <span class="hero-tag">KPI Metrics</span>
+                <span class="hero-tag">Sidebar Filters</span>
+                <span class="hero-tag">Charts + Table</span>
+                <span class="hero-tag">Bitrix24 Ready</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metrics(filtered: pd.DataFrame) -> None:
+    total_leads = len(filtered)
+    pipeline_value = filtered["deal_value"].sum() if total_leads else 0.0
+    high_priority = int((filtered["priority"] == "High").sum()) if total_leads else 0
+    conversion_rate = filtered["conversion_probability"].mean() if total_leads else 0.0
+    avg_budget = filtered["budget"].mean() if total_leads else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("High Priority Leads", high_priority)
+    c2.metric("Conversion Rate", f"{conversion_rate:.1f}%")
+    c3.metric("Total Value", format_currency(pipeline_value))
+    c4.metric("Average Budget", format_currency(avg_budget))
+
+    st.caption(f"Visible leads after filters: {total_leads}")
+
+
+def render_overview_cards(filtered: pd.DataFrame) -> None:
+    if filtered.empty:
+        return
+
+    top_company = filtered.iloc[0]["company"]
+    top_probability = filtered.iloc[0]["conversion_probability"]
+    fastest_manager = filtered.groupby("manager")["last_activity_days"].mean().sort_values().index[0]
+    best_source = filtered.groupby("source")["conversion_probability"].mean().sort_values(ascending=False).index[0]
+
+    left, middle, right = st.columns([1.1, 1, 1])
+
+    with left:
+        st.markdown(
+            f"""
+            <div class="section-card">
+                <div class="section-title">Opportunity Radar</div>
+                <div class="section-subtle">Fast read of the current pipeline after applying filters.</div>
+                <div class="mini-grid">
+                    <div class="mini-stat">
+                        <div class="mini-label">Top lead</div>
+                        <div class="mini-value">{top_company}</div>
+                    </div>
+                    <div class="mini-stat">
+                        <div class="mini-label">Top conversion</div>
+                        <div class="mini-value">{top_probability:.1f}%</div>
+                    </div>
+                    <div class="mini-stat">
+                        <div class="mini-label">Fastest manager</div>
+                        <div class="mini-value">{fastest_manager}</div>
+                    </div>
+                    <div class="mini-stat">
+                        <div class="mini-label">Best source</div>
+                        <div class="mini-value">{best_source}</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with middle:
+        stage_counts = (
+            filtered.groupby(filtered["stage"].astype(str), observed=False)
+            .size()
+            .reindex(STAGE_ORDER, fill_value=0)
+        )
+        st.markdown('<div class="section-card"><div class="section-title">Stage Distribution</div><div class="section-subtle">Where the visible deals currently sit in the funnel.</div>', unsafe_allow_html=True)
+        st.bar_chart(stage_counts)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with right:
+        manager_scores = filtered.groupby("manager")["conversion_probability"].mean().sort_values(ascending=False)
+        st.markdown('<div class="section-card"><div class="section-title">Manager Performance</div><div class="section-subtle">Average conversion probability by owner.</div>', unsafe_allow_html=True)
+        st.bar_chart(manager_scores)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_top_leads(filtered: pd.DataFrame) -> None:
+    st.markdown("### Top Opportunities")
+    if filtered.empty:
+        st.info("No leads available for ranking.")
+        return
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    for _, row in filtered.head(5).iterrows():
+        fill = min(max(float(row["conversion_probability"]), 0.0), 100.0)
+        st.markdown(
+            f"""
+            <div class="lead-strip">
+                <div>
+                    <strong>{row["company"]}</strong>
+                    <div class="lead-meta">{row["lead_id"]} | {row["manager"]} | {row["stage"]} | {row["industry"]}</div>
+                </div>
+                <div style="min-width: 15rem; width: 40%;">
+                    <div class="bar-track"><div class="bar-fill" style="width:{fill}%;"></div></div>
+                    <div class="lead-meta" style="margin-top:0.35rem;">Conversion {row["conversion_probability"]:.1f}% | Value {format_currency(row["deal_value"])}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_manager_snapshot(filtered: pd.DataFrame) -> None:
+    st.markdown("### Manager Snapshot")
+    if filtered.empty:
+        st.info("No manager data available.")
+        return
+
+    grouped = (
+        filtered.groupby("manager")
+        .agg(
+            leads=("lead_id", "count"),
+            conversion_probability=("conversion_probability", "mean"),
+            pipeline_value=("deal_value", "sum"),
+        )
+        .sort_values(["conversion_probability", "pipeline_value"], ascending=[False, False])
+        .reset_index()
+    )
+    grouped["conversion_probability"] = grouped["conversion_probability"].map(lambda value: f"{value:.1f}%")
+    grouped["pipeline_value"] = grouped["pipeline_value"].map(format_currency)
+    st.dataframe(grouped, use_container_width=True, hide_index=True)
+
+
+def build_recommendations(filtered: pd.DataFrame) -> list[str]:
+    if filtered.empty:
         return []
 
-    q_word = word_vectorizer.transform([query])
-    q_char = char_vectorizer.transform([query])
-    word_scores = (word_matrix @ q_word.T).toarray().ravel()
-    char_scores = (char_matrix @ q_char.T).toarray().ravel()
-    scores = (0.35 * word_scores) + (0.65 * char_scores)
+    recommendations: list[str] = []
 
-    order = np.argsort(scores)[::-1]
-    results = []
-    for idx in order[:top_k]:
-        score = float(scores[idx])
-        if score <= 0.08:
-            continue
-        chunk = chunks[idx]
-        results.append((score, chunk))
-    return results
-
-
-def build_answer(query: str, retrieved: list[tuple[float, Chunk]]) -> str:
-    if not retrieved:
-        return (
-            "I could not find a confident answer in the uploaded FAQ files. "
-            "Try rephrasing the question or upload a more relevant document."
+    stale = filtered[filtered["last_activity_days"] >= 5]
+    if not stale.empty:
+        recommendations.append(
+            f"{len(stale)} lead(s) show inactivity of 5+ days. Re-engagement tasks should be prioritized this week."
         )
 
-    best_score, best_chunk = retrieved[0]
-
-    if best_score < 0.55:
-        suggestions = []
-        for _, chunk in retrieved[:3]:
-            label = chunk.question or chunk.text.splitlines()[0]
-            suggestions.append(label.strip())
-        suggestion_text = "; ".join(suggestions) if suggestions else "a more specific FAQ entry"
-        return (
-            "I could not find a confident answer in the FAQ.\n\n"
-            f"Closest FAQ questions: {suggestion_text}"
+    high_value = filtered[(filtered["priority"] == "High") & (filtered["stage"].astype(str).isin(["Proposal", "Negotiation"]))]
+    if not high_value.empty:
+        recommendations.append(
+            f"{len(high_value)} high-priority deal(s) are already in proposal or negotiation. These are the closest revenue opportunities."
         )
 
-    if best_chunk.answer:
-        return best_chunk.answer
-
-    keywords = extract_keywords(query)
-    lead = "Here is the most relevant information I found:"
-    if keywords:
-        lead = f"Here is the most relevant information about {', '.join(keywords[:3])}:"
-
-    bullets = []
-    for score, chunk in retrieved[:3]:
-        snippet = chunk.text
-        if len(snippet) > 180:
-            snippet = snippet[:177].rstrip() + "..."
-        bullets.append(f"- {snippet} [{chunk.doc_name}]")
-
-    return f"{lead}\n" + "\n".join(bullets) + "\n\nIf you want, I can keep searching across the uploaded FAQ set."
-
-
-def format_sources(retrieved: list[tuple[float, Chunk]]) -> list[dict[str, str]]:
-    items = []
-    for score, chunk in retrieved[:4]:
-        items.append(
-            {
-                "document": chunk.doc_name,
-                "question": chunk.question or "",
-                "chunk": str(chunk.chunk_id + 1),
-                "score": f"{score:.3f}",
-                "answer": chunk.answer[:260] if chunk.answer else chunk.text[:260],
-            }
+    weak_engagement = filtered[filtered["email_open_rate"] < 50]
+    if not weak_engagement.empty:
+        recommendations.append(
+            f"{len(weak_engagement)} lead(s) have low email engagement. Consider a call-first follow-up instead of another email."
         )
-    return items
 
-
-def index_sources(sources: list[tuple[str, str]], max_chars: int, progress=None):
-    chunks = make_chunks_from_sources(sources, max_chars=max_chars)
-    if progress is not None:
-        progress.progress(30, text="Chunking FAQ content...")
-    word_vectorizer, word_matrix, char_vectorizer, char_matrix = build_index(chunks)
-    if progress is not None:
-        progress.progress(85, text="Building semantic index...")
-    return chunks, word_vectorizer, word_matrix, char_vectorizer, char_matrix
-
-
-def start_new_chat() -> None:
-    if st.session_state.messages:
-        st.session_state.conversations.insert(
-            0,
-            {
-                "title": st.session_state.messages[0]["content"][:48],
-                "messages": st.session_state.messages.copy(),
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            },
-        )
-    st.session_state.messages = []
-    st.session_state.active_conversation_id = "current"
-
-
-def render_sidebar() -> None:
-    st.sidebar.markdown("## Controls")
-    st.sidebar.caption("Upload FAQ files, then ask questions in natural language.")
-
-    max_chars = st.sidebar.slider("Chunk size", 300, 1200, 800, 50)
-    top_k = st.sidebar.slider("Top matches", 1, 6, 3, 1)
-    use_sample = st.sidebar.toggle("Use sample FAQ", value=True)
-
-    uploaded_files = st.sidebar.file_uploader(
-        "Upload FAQ documents",
-        type=["pdf", "txt", "md", "csv"],
-        accept_multiple_files=True,
-        help="Upload one or more knowledge base files.",
+    top_source = filtered.groupby("source")["conversion_probability"].mean().sort_values(ascending=False).index[0]
+    recommendations.append(
+        f"Best-performing source in the current view is {top_source}. It would be a strong candidate for more budget allocation."
     )
 
-    if st.sidebar.button("Build / Refresh index", use_container_width=True):
-        sources: list[tuple[str, str]] = []
-        if use_sample:
-            for idx, item in enumerate(SAMPLE_KB, 1):
-                sources.append((f"sample_faq_{idx}.txt", f"{idx}. {item['question']}\n{item['answer']}"))
-        if uploaded_files:
-            for file in uploaded_files:
-                sources.append((file.name, read_uploaded_file(file)))
+    return recommendations[:4]
 
-        if not sources:
-            st.sidebar.warning("Add at least one FAQ file or enable the sample FAQ.")
+
+def render_insights(filtered: pd.DataFrame) -> None:
+    left, right = st.columns([1.2, 1])
+
+    with left:
+        st.markdown("### Pipeline Insights")
+        recommendations = build_recommendations(filtered)
+        if not recommendations:
+            st.info("Insights will appear once leads are loaded.")
         else:
-            fingerprint = corpus_fingerprint(sources)
-            if fingerprint == st.session_state.corpus_hash and st.session_state.index_ready:
-                st.sidebar.success("Index is already up to date.")
-            else:
-                progress = st.sidebar.progress(0, text="Preparing documents...")
-                chunks, word_vectorizer, word_matrix, char_vectorizer, char_matrix = index_sources(
-                    sources, max_chars=max_chars, progress=progress
-                )
-                progress.progress(100, text="Index ready")
+            items = "".join(f"<li>{item}</li>" for item in recommendations)
+            st.markdown(
+                f"""
+                <div class="section-card">
+                    <div class="section-title">Recommended Actions</div>
+                    <div class="section-subtle">Heuristic guidance generated from the visible pipeline state.</div>
+                    <ul class="insight-list">{items}</ul>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-                st.session_state.docs = sources
-                st.session_state.chunks = chunks
-                st.session_state.word_vectorizer = word_vectorizer
-                st.session_state.word_matrix = word_matrix
-                st.session_state.char_vectorizer = char_vectorizer
-                st.session_state.char_matrix = char_matrix
-                st.session_state.corpus_hash = fingerprint
-                st.session_state.index_ready = True
-                st.session_state.last_sources = []
-                st.sidebar.success(f"Indexed {len(sources)} documents and {len(chunks)} chunks.")
+    with right:
+        st.markdown("### Priority Mix")
+        if filtered.empty:
+            st.info("No priority data available.")
+        else:
+            mix = filtered["priority"].value_counts().reindex(["High", "Medium", "Low"], fill_value=0)
+            mix_df = pd.DataFrame({"priority": mix.index, "leads": mix.values})
+            st.dataframe(mix_df, use_container_width=True, hide_index=True)
 
-    st.sidebar.divider()
-    st.sidebar.markdown("### Conversation history")
-    if st.session_state.conversations:
-        options = ["Current chat"] + [
-            f"{item['created_at']} - {item['title']}" for item in st.session_state.conversations
+
+def render_lead_table(filtered: pd.DataFrame) -> None:
+    st.markdown("### Lead Table")
+    if filtered.empty:
+        st.warning("No leads match the selected filters.")
+        return
+
+    display = filtered[
+        [
+            "lead_id",
+            "company",
+            "manager",
+            "industry",
+            "stage",
+            "budget",
+            "deal_value",
+            "conversion_probability",
+            "pricing_recommendation",
+            "priority",
+            "bitrix_owner",
         ]
-        selected = st.sidebar.selectbox("Load conversation", options, index=0)
-        if selected != "Current chat":
-            idx = options.index(selected) - 1
-            st.session_state.messages = st.session_state.conversations[idx]["messages"].copy()
-            st.sidebar.info("Loaded saved conversation into the main chat.")
-    else:
-        st.sidebar.caption("No saved chats yet.")
+    ].copy()
+    display["budget"] = display["budget"].map(format_currency)
+    display["deal_value"] = display["deal_value"].map(format_currency)
+    display["conversion_probability"] = display["conversion_probability"].map(lambda value: f"{value:.1f}%")
+    st.dataframe(display, use_container_width=True, hide_index=True)
 
-    if st.sidebar.button("New chat", use_container_width=True):
-        start_new_chat()
-        st.rerun()
 
-    st.sidebar.divider()
-    st.sidebar.markdown("### Status")
-    st.sidebar.write("Index ready" if st.session_state.index_ready else "Index not built yet")
-    st.sidebar.write(f"Documents: {len(st.session_state.docs)}")
-    st.sidebar.write(f"Messages: {len(st.session_state.messages)}")
+def render_selected_lead(filtered: pd.DataFrame) -> None:
+    st.markdown("### Lead Detail View")
+    if filtered.empty:
+        st.info("Select filters that keep at least one lead visible.")
+        return
 
-    return top_k, max_chars
+    selected_id = st.selectbox("Choose lead", filtered["lead_id"].tolist())
+    selected = filtered[filtered["lead_id"] == selected_id].iloc[0]
+
+    priority_badge = priority_class(selected["priority"])
+    win_prob = int(selected["conversion_probability"])
+
+    st.markdown(
+        f"""
+        <div class="section-card">
+            <div style="display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;flex-wrap:wrap;">
+                <div>
+                    <div class="section-title">{selected["company"]}</div>
+                    <div class="section-subtle">{selected["lead_id"]} | {selected["industry"]} | {selected["region"]}</div>
+                    <span class="priority-pill {priority_badge}">{selected["priority"]} Priority</span>
+                </div>
+                <div style="min-width:16rem;">
+                    <div class="mini-label">Conversion probability</div>
+                    <div class="bar-track" style="margin-top:0.35rem;"><div class="bar-fill" style="width:{win_prob}%;"></div></div>
+                    <div class="lead-meta" style="margin-top:0.4rem;">{win_prob}% based on current lead signals</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Stage", str(selected["stage"]))
+    c2.metric("Conversion", f"{selected['conversion_probability']:.1f}%")
+    c3.metric("Deal Value", format_currency(selected["deal_value"]))
+    c4.metric("Last Activity", f"{int(selected['last_activity_days'])} day(s)")
+
+    detail_df = pd.DataFrame(
+        [
+            ("Manager", selected["manager"]),
+            ("Bitrix Owner", selected["bitrix_owner"]),
+            ("Source", selected["source"]),
+            ("Budget", format_currency(selected["budget"])),
+            ("Pricing Recommendation", selected["pricing_recommendation"]),
+            ("Sales Strategy", selected["strategy_note"]),
+            ("Meetings Booked", int(selected["meetings_booked"])),
+            ("Email Open Rate", f"{selected['email_open_rate']:.0f}%"),
+            ("Employees", int(selected["employees"])),
+        ],
+        columns=["Field", "Value"],
+    )
+    with st.expander("Open lead details", expanded=True):
+        st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 
 def main() -> None:
@@ -642,83 +858,30 @@ def main() -> None:
     init_state()
     st.markdown(CSS, unsafe_allow_html=True)
 
-    st.markdown(
-        """
-        <div class="hero">
-            <h1>Smart FAQ Chatbot (RAG)</h1>
-            <p>Upload company FAQ documents, index them semantically, and answer user questions with chat history and source references.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    all_leads, filtered = render_sidebar()
+    render_hero(len(all_leads))
+
+    st.caption(
+        "This application is fully repurposed for Project 3: Lead Scoring & Pipeline Manager with Bitrix24-friendly fields, KPI cards, filters, charts, and a sortable lead table."
     )
 
-    top_k, max_chars = render_sidebar()
+    if st.session_state.response_seconds is not None:
+        st.info(f"Data loaded in {st.session_state.response_seconds:.4f} seconds.")
 
-    col_a, col_b, col_c = st.columns(3)
-    col_a.metric("Indexed docs", len(st.session_state.docs))
-    col_b.metric("Chat turns", len(st.session_state.messages))
-    col_c.metric("Chunks", len(st.session_state.chunks))
+    if filtered.empty:
+        st.info("Choose a dataset in the sidebar and click `Load data`.")
+        return
 
-    st.caption("Tip: keep the sample FAQ enabled for a ready-to-demo chatbot, then replace it with your own documents.")
-
-    if not st.session_state.index_ready:
-        st.info("Build the index from the sidebar first. The sample FAQ is enough to test the full chat flow.")
-
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if message.get("sources"):
-                with st.expander("Sources used"):
-                    st.dataframe(message["sources"], use_container_width=True, hide_index=True)
-
-    user_query = st.chat_input("Ask a question about the FAQ...")
-
-    if user_query:
-        if (
-            not st.session_state.index_ready
-            or st.session_state.word_vectorizer is None
-            or st.session_state.word_matrix is None
-            or st.session_state.char_vectorizer is None
-            or st.session_state.char_matrix is None
-        ):
-            st.warning("Please build the FAQ index first.")
-            st.stop()
-
-        st.session_state.messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-
-        retrieved = rank_chunks(
-            user_query,
-            st.session_state.word_vectorizer,
-            st.session_state.word_matrix,
-            st.session_state.char_vectorizer,
-            st.session_state.char_matrix,
-            st.session_state.chunks,
-            top_k=top_k,
-        )
-        answer = build_answer(user_query, retrieved)
-        sources = format_sources(retrieved)
-
-        st.session_state.messages.append(
-            {"role": "assistant", "content": answer, "sources": sources}
-        )
-
-        with st.chat_message("assistant"):
-            st.markdown(answer)
-            if sources:
-                with st.expander("Sources used"):
-                    st.dataframe(sources, use_container_width=True, hide_index=True)
-
-    if st.session_state.messages:
-        st.sidebar.divider()
-        st.sidebar.markdown("### Recent answer")
-        last_assistant = next(
-            (m for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
-            None,
-        )
-        if last_assistant:
-            st.sidebar.write(last_assistant["content"][:280])
+    render_metrics(filtered)
+    render_overview_cards(filtered)
+    left, right = st.columns([1.05, 0.95])
+    with left:
+        render_top_leads(filtered)
+    with right:
+        render_manager_snapshot(filtered)
+    render_insights(filtered)
+    render_lead_table(filtered)
+    render_selected_lead(filtered)
 
 
 if __name__ == "__main__":

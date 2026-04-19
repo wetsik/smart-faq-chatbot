@@ -1,4 +1,2 @@
 streamlit
-pypdf
-scikit-learn
-numpy
+pandas

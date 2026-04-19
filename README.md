@@ -1,14 +1,15 @@
-Smart FAQ Chatbot (RAG)
-=======================
+Lead Scoring & Pipeline Manager
+===============================
 
-Streamlit chatbot for FAQ / knowledge-base Q&A with:
+Streamlit dashboard redesigned from the old FAQ chatbot into Project 3 from the documentation:
 
-- file upload for PDF, TXT, MD, and CSV knowledge sources
-- semantic retrieval with TF-IDF cosine similarity
-- chat UI with `st.chat_message` and `st.chat_input`
-- sidebar conversation history
-- progress indicator while indexing
-- session-state powered multi-turn conversations
+- KPI cards for filtered leads, average score, high-priority leads, and total pipeline value
+- sidebar filters for manager, stage, industry, conversion probability, and budget range
+- sortable lead table for CRM review
+- bar charts for pipeline stage distribution and manager performance
+- Bitrix24-ready field support through `bitrix_owner` and CRM-style pipeline stages
+- separate test CSV dataset in `sample_leads.csv`
+- conversion probability and pricing recommendation for each lead
 
 Run locally
 -----------
@@ -18,67 +19,36 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Optional healthcheck endpoint
------------------------------
-
-This project can also start a tiny HTTP healthcheck server, similar to a keep-alive `/health` route.
-
-Public app URL:
-
-- `https://smart-faq-chatbot-qgjc2afkvrqdothrrasrs2.streamlit.app/`
-
-Set a separate port before startup:
-
-```bash
-HEALTHCHECK_ENABLED=true
-HEALTHCHECK_PORT=8080
-streamlit run app.py
-```
-
-If your platform exposes that extra port, your monitor can ping:
-
-- `http://your-host:8080/health`
-- `http://your-host:8080/`
-
-Important:
-
-- `HEALTHCHECK_PORT` must be different from the Streamlit port.
-- If your hosting platform exposes only the main Streamlit port, this workaround may not be reachable from the outside.
-- On platforms that force app sleeping at the infrastructure level, `/health` helps only if the host actually counts that ping as external traffic.
-- For this Streamlit deployment, point the external monitor to `https://smart-faq-chatbot-qgjc2afkvrqdothrrasrs2.streamlit.app/`.
-
-How it works
+Project idea
 ------------
 
-1. Keep `Use sample FAQ` enabled for a ready demo, or upload your own FAQ files.
-2. Click `Build / Refresh index`.
-3. Ask questions in the chat box.
-4. Open `Sources used` to inspect the retrieved chunks.
+This app analyzes uploaded CRM leads or a built-in sample dataset, calculates a lead score, conversion probability, pricing recommendation, and presents the result in a dashboard. It follows the Project 3 brief:
 
-Notes
------
+- multiple KPI columns
+- dataframe with sorting
+- sidebar filters
+- charts for distribution and performance
+- expandable lead details
 
-- If you later want LLM-generated answers, you can extend `build_answer()` with an API-backed summarizer.
-- The current implementation works fully offline after installation and is suitable for Streamlit Cloud.
+Recommended CSV columns
+-----------------------
 
-GitHub setup
-------------
+Use a CSV with fields like:
 
-```bash
-git init
-git add .
-git commit -m "Initial Smart FAQ Chatbot"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-git push -u origin main
+```text
+lead_id,company,manager,industry,source,region,stage,budget,deal_value,last_activity_days,meetings_booked,email_open_rate,employees,bitrix_owner
 ```
 
-Streamlit Cloud
----------------
+Bitrix24 note
+-------------
 
-1. Push this repository to GitHub.
-2. Open Streamlit Cloud and choose `New app`.
-3. Select your repository, branch `main`, and set the main file path to `app.py`.
-4. Deploy.
+The current version is Bitrix24-ready at the UI/data level. If needed later, you can extend it with direct Bitrix24 API sync for leads, deals, and pipeline stages.
 
-If you want private secrets later, add them in Streamlit Cloud as app secrets instead of committing them to GitHub.
+Deploy
+------
+
+The project is designed for Streamlit Cloud deployment and matches the documentation criteria:
+
+- Streamlit app
+- browser-accessible live URL after deployment
+- public or private Streamlit Cloud access
