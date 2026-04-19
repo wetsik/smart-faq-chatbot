@@ -18,6 +18,35 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+Optional healthcheck endpoint
+-----------------------------
+
+This project can also start a tiny HTTP healthcheck server, similar to a keep-alive `/health` route.
+
+Public app URL:
+
+- `https://smart-faq-chatbot-qgjc2afkvrqdothrrasrs2.streamlit.app/`
+
+Set a separate port before startup:
+
+```bash
+HEALTHCHECK_ENABLED=true
+HEALTHCHECK_PORT=8080
+streamlit run app.py
+```
+
+If your platform exposes that extra port, your monitor can ping:
+
+- `http://your-host:8080/health`
+- `http://your-host:8080/`
+
+Important:
+
+- `HEALTHCHECK_PORT` must be different from the Streamlit port.
+- If your hosting platform exposes only the main Streamlit port, this workaround may not be reachable from the outside.
+- On platforms that force app sleeping at the infrastructure level, `/health` helps only if the host actually counts that ping as external traffic.
+- For this Streamlit deployment, point the external monitor to `https://smart-faq-chatbot-qgjc2afkvrqdothrrasrs2.streamlit.app/`.
+
 How it works
 ------------
 

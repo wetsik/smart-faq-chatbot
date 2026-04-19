@@ -3,10 +3,13 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import os
 import re
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterable
 
 import numpy as np
@@ -21,6 +24,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+HEALTH_SERVER_STARTED = False
 
 
 CSS = """
@@ -113,6 +118,78 @@ SAMPLE_KB = [
         "answer": "Invoices are sent automatically after payment. If you need a VAT invoice, include your company details in the billing profile.",
     },
 ]
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def _send_ok(self, body: bool = False) -> None:
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        if body:
+            self.wfile.write(b"ok")
+
+    def do_GET(self) -> None:
+        if self.path in ("/", "/health"):
+            self._send_ok(body=True)
+            return
+
+        self.send_response(404)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"not found")
+
+    def do_HEAD(self) -> None:
+        if self.path in ("/", "/health"):
+            self._send_ok(body=False)
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+def start_health_server() -> None:
+    global HEALTH_SERVER_STARTED
+
+    if HEALTH_SERVER_STARTED:
+        return
+
+    enabled = os.environ.get("HEALTHCHECK_ENABLED", "true").lower() == "true"
+    if not enabled:
+        return
+
+    health_port_raw = os.environ.get("HEALTHCHECK_PORT", "").strip()
+    if not health_port_raw:
+        return
+
+    try:
+        health_port = int(health_port_raw)
+    except ValueError:
+        print(f"Skipping health server: invalid HEALTHCHECK_PORT={health_port_raw!r}")
+        return
+
+    streamlit_port_raw = os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("PORT", "8501")
+    try:
+        streamlit_port = int(streamlit_port_raw)
+    except ValueError:
+        streamlit_port = 8501
+
+    if health_port == streamlit_port:
+        print(
+            "Skipping health server: HEALTHCHECK_PORT matches the Streamlit port. "
+            "Use a separate port if your host exposes one."
+        )
+        return
+
+    def run_server() -> None:
+        server = ThreadingHTTPServer(("0.0.0.0", health_port), HealthHandler)
+        print(f"Health server started on port {health_port}")
+        server.serve_forever()
+
+    threading.Thread(target=run_server, daemon=True).start()
+    HEALTH_SERVER_STARTED = True
 
 
 def init_state() -> None:
@@ -561,6 +638,7 @@ def render_sidebar() -> None:
 
 
 def main() -> None:
+    start_health_server()
     init_state()
     st.markdown(CSS, unsafe_allow_html=True)
 
